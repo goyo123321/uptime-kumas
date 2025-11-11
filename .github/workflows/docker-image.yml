@@ -1,4 +1,4 @@
-name: Docker Image CI
+name: Build and Push Uptime Kuma Docker Image
 
 on:
   push:
@@ -6,13 +6,109 @@ on:
   pull_request:
     branches: [ "master" ]
 
+env:
+  REGISTRY: docker.io  # 或 ghcr.io
+  IMAGE_NAME: "uptime-kuma"  # 对于Docker Hub: your-username/uptime-kuma
+
 jobs:
 
-  build:
-
+  build-and-push:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'  # 只在推送时构建和推送，PR时只构建
+    
+    strategy:
+      matrix:
+        target: [release, rootless]  # 构建多个目标
+        include:
+          - target: release
+            tags: latest,release-${{ github.sha }}
+          - target: rootless  
+            tags: rootless,rootless-${{ github.sha }}
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=${{ matrix.tags }}
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        target: ${{ matrix.target }}
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name == 'push' }}  # 只在推送时推送
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # 测试构建（在PR时运行）
+  test-build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Test build all targets
+      run: |
+        docker build . --target release --tag test-release
+        docker build . --target rootless --tag test-rootless
+        echo "Build test completed successfully"
+
+  # 可选：推送到GitHub Packages
+  push-to-ghcr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: build-and-push
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push to GHCR
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        target: rootless
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/uptime-kuma:latest
+          ghcr.io/${{ github.repository_owner }}/uptime-kuma:${{ github.sha }}
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
