@@ -109,7 +109,7 @@ jobs:
           echo "📦 镜像已成功推送到 GitHub Container Registry"
           echo "=========================================="
           echo ""
-          echo "📍 镜像地址: ghcr.io/goyo123321/uptime-kuma"
+          echo "📍 镜像地址: ghcr.io/goyo123321/myuptime"
           echo ""
           echo "🏷️  可用的标签:"
           echo "   • latest (推荐使用)"
