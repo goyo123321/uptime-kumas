@@ -7,10 +7,6 @@ on:
         description: '自定义标签 (可选)'
         required: false
         default: 'stable'
-      image_name:
-        description: '镜像名称'
-        required: false
-        default: 'uptime-kuma'
 
 jobs:
   copy-image:
@@ -46,52 +42,62 @@ jobs:
           CREATED_DATE=$(docker inspect ghcr.io/louislam/uptime-kuma:nightly2 | jq -r '.[0].Created' | cut -d'T' -f1 | tr -d '-')
           echo "created_date=$CREATED_DATE" >> $GITHUB_OUTPUT
           
-          # 获取镜像ID的前8位作为短ID
-          IMAGE_ID=$(docker images --no-trunc ghcr.io/louislam/uptime-kuma:nightly2 | awk 'NR==2 {print $3}' | cut -c 1-8)
-          echo "image_id_short=$IMAGE_ID" >> $GITHUB_OUTPUT
+          # 获取镜像ID的前8位（只保留字母数字）
+          IMAGE_ID=$(docker images --quiet ghcr.io/louislam/uptime-kuma:nightly2 | cut -c 1-12)
+          CLEAN_IMAGE_ID=$(echo "$IMAGE_ID" | tr -d '[:punct:]')
+          echo "image_id_short=$CLEAN_IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "镜像ID: $IMAGE_ID, 清理后: $CLEAN_IMAGE_ID"
 
       - name: Retag images
         run: |
           echo "🏷️  正在重新标记镜像..."
           
-          # 基础变量
-          OWNER="${{ github.repository_owner }}"
-          IMAGE_NAME="${{ github.event.inputs.image_name }}"
+          # 固定镜像名称
+          TARGET_IMAGE="ghcr.io/goyo123321/uptime-kuma"
           CUSTOM_TAG="${{ github.event.inputs.custom_tag }}"
           CREATED_DATE="${{ steps.meta.outputs.created_date }}"
           IMAGE_ID="${{ steps.meta.outputs.image_id_short }}"
           
-          # 重新打标签
-          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ghcr.io/$OWNER/$IMAGE_NAME:latest
-          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ghcr.io/$OWNER/$IMAGE_NAME:stable
-          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ghcr.io/$OWNER/$IMAGE_NAME:$CREATED_DATE
-          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ghcr.io/$OWNER/$IMAGE_NAME:$CUSTOM_TAG
-          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ghcr.io/$OWNER/$IMAGE_NAME:nightly2-$IMAGE_ID
+          echo "目标镜像: $TARGET_IMAGE"
+          echo "自定义标签: $CUSTOM_TAG"
+          echo "创建日期: $CREATED_DATE"
+          echo "镜像ID: $IMAGE_ID"
+          
+          # 重新打标签 - 使用安全的标签名称
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 $TARGET_IMAGE:latest
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 $TARGET_IMAGE:stable
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 $TARGET_IMAGE:$CREATED_DATE
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 $TARGET_IMAGE:$CUSTOM_TAG
+          
+          # 只有当IMAGE_ID不为空且有效时才创建带ID的标签
+          if [ -n "$IMAGE_ID" ] && [ "$IMAGE_ID" != "null" ]; then
+            docker tag ghcr.io/louislam/uptime-kuma:nightly2 $TARGET_IMAGE:nightly2-$IMAGE_ID
+            echo "✅ 创建了带ID的标签: nightly2-$IMAGE_ID"
+          else
+            echo "⚠️  无法获取有效的镜像ID，跳过创建带ID的标签"
+          fi
           
           echo "✅ 镜像标记完成"
-          echo "创建的标签:"
-          echo "  - latest"
-          echo "  - stable" 
-          echo "  - $CREATED_DATE (创建日期)"
-          echo "  - $CUSTOM_TAG (自定义标签)"
-          echo "  - nightly2-$IMAGE_ID (带ID的nightly版本)"
 
       - name: Push images to GHCR
         run: |
           echo "🚀 正在推送镜像到 GHCR..."
           
-          OWNER="${{ github.repository_owner }}"
-          IMAGE_NAME="${{ github.event.inputs.image_name }}"
+          TARGET_IMAGE="ghcr.io/goyo123321/uptime-kuma"
           CUSTOM_TAG="${{ github.event.inputs.custom_tag }}"
           CREATED_DATE="${{ steps.meta.outputs.created_date }}"
           IMAGE_ID="${{ steps.meta.outputs.image_id_short }}"
           
-          # 推送所有标签
-          docker push ghcr.io/$OWNER/$IMAGE_NAME:latest
-          docker push ghcr.io/$OWNER/$IMAGE_NAME:stable
-          docker push ghcr.io/$OWNER/$IMAGE_NAME:$CREATED_DATE
-          docker push ghcr.io/$OWNER/$IMAGE_NAME:$CUSTOM_TAG
-          docker push ghcr.io/$OWNER/$IMAGE_NAME:nightly2-$IMAGE_ID
+          # 推送基础标签
+          docker push $TARGET_IMAGE:latest
+          docker push $TARGET_IMAGE:stable
+          docker push $TARGET_IMAGE:$CREATED_DATE
+          docker push $TARGET_IMAGE:$CUSTOM_TAG
+          
+          # 只有当IMAGE_ID不为空且有效时才推送带ID的标签
+          if [ -n "$IMAGE_ID" ] && [ "$IMAGE_ID" != "null" ]; then
+            docker push $TARGET_IMAGE:nightly2-$IMAGE_ID
+          fi
           
           echo "✅ 所有镜像推送完成"
 
@@ -103,21 +109,23 @@ jobs:
           echo "📦 镜像已成功推送到 GitHub Container Registry"
           echo "=========================================="
           echo ""
-          echo "📍 镜像地址: ghcr.io/${{ github.repository_owner }}/${{ github.event.inputs.image_name }}"
+          echo "📍 镜像地址: ghcr.io/goyo123321/uptime-kuma"
           echo ""
           echo "🏷️  可用的标签:"
           echo "   • latest (推荐使用)"
           echo "   • stable"
           echo "   • ${{ steps.meta.outputs.created_date }} (创建日期)"
           echo "   • ${{ github.event.inputs.custom_tag }} (自定义标签)"
-          echo "   • nightly2-${{ steps.meta.outputs.image_id_short }} (带ID版本)"
+          if [ -n "${{ steps.meta.outputs.image_id_short }}" ] && [ "${{ steps.meta.outputs.image_id_short }}" != "null" ]; then
+            echo "   • nightly2-${{ steps.meta.outputs.image_id_short }} (带ID版本)"
+          fi
           echo ""
           echo "🔗 拉取示例:"
-          echo "   docker pull ghcr.io/${{ github.repository_owner }}/${{ github.event.inputs.image_name }}:latest"
+          echo "   docker pull ghcr.io/goyo123321/uptime-kuma:latest"
           echo ""
           echo "📋 使用 docker-compose 示例:"
-          echo "   image: ghcr.io/${{ github.repository_owner }}/${{ github.event.inputs.image_name }}:latest"
+          echo "   image: ghcr.io/goyo123321/uptime-kuma:latest"
           echo ""
           echo "🌐 查看镜像:"
-          echo "   访问 https://github.com/${{ github.repository_owner }}?tab=packages"
+          echo "   访问 https://github.com/goyo123321?tab=packages"
           echo "=========================================="
