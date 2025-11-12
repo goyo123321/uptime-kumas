@@ -1,30 +1,120 @@
-name: Build and Push Uptime Kuma Docker Image
+name: Build and Push Uptime Kuma
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
 
 env:
-  REGISTRY: docker.io  # 或 ghcr.io
-  IMAGE_NAME: "uptime-kuma"  # 对于Docker Hub: your-username/uptime-kuma
+  # 配置镜像名称 - 请修改为你的用户名
+  DOCKERHUB_IMAGE: "goyo123321/uptime-kuma"
+  GHCR_IMAGE: "ghcr.io/${{ github.repository_owner }}/uptime-kuma"
 
 jobs:
 
-  build-and-push:
+  # 构建基础镜像
+  build-base-images:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'  # 只在推送时构建和推送，PR时只构建
+    outputs:
+      base2-tag: ${{ steps.tag.outputs.base2-tag }}
+      builder-go-tag: ${{ steps.tag.outputs.builder-go-tag }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Generate tags
+      id: tag
+      run: |
+        echo "base2-tag=base2-$(date +%Y%m%d)-${{ github.sha }}" >> $GITHUB_OUTPUT
+        echo "builder-go-tag=builder-go-$(date +%Y%m%d)-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+    - name: Build base2-slim image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: debian-base.dockerfile
+        target: base2-slim
+        tags: |
+          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.base2-tag }}-slim
+        push: false
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build base2 image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: debian-base.dockerfile
+        target: base2
+        tags: |
+          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.base2-tag }}
+        push: false
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build builder-go image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: builder-go.dockerfile
+        tags: |
+          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.builder-go-tag }}
+        push: false
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # 构建主应用镜像
+  build-main-images:
+    needs: build-base-images
+    runs-on: ubuntu-latest
     
     strategy:
       matrix:
-        target: [release, rootless]  # 构建多个目标
-        include:
-          - target: release
-            tags: latest,release-${{ github.sha }}
-          - target: rootless  
-            tags: rootless,rootless-${{ github.sha }}
+        target: [release, rootless, nightly]
+        platform: [linux/amd64, linux/arm64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build healthcheck binary
+      run: |
+        # 构建健康检查工具
+        docker build -f builder-go.dockerfile -t temp-builder-go .
+        
+    - name: Build main image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        target: ${{ matrix.target }}
+        platforms: ${{ matrix.platform }}
+        build-args: |
+          BASE_IMAGE=${{ env.DOCKERHUB_IMAGE }}:${{ needs.build-base-images.outputs.base2-tag }}
+        tags: |
+          ${{ env.DOCKERHUB_IMAGE }}:${{ matrix.target }}-${{ matrix.platform }}-${{ github.sha }}
+        push: false
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # 多架构构建和推送
+  push-multiarch:
+    needs: [build-base-images, build-main-images]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    
+    strategy:
+      matrix:
+        target: [release, rootless]
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -38,61 +128,6 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=raw,value=${{ matrix.tags }}
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        target: ${{ matrix.target }}
-        platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name == 'push' }}  # 只在推送时推送
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  # 测试构建（在PR时运行）
-  test-build:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Test build all targets
-      run: |
-        docker build . --target release --tag test-release
-        docker build . --target rootless --tag test-rootless
-        echo "Build test completed successfully"
-
-  # 可选：推送到GitHub Packages
-  push-to-ghcr:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    needs: build-and-push
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
       with:
@@ -100,15 +135,117 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build and push to GHCR
+    - name: Extract metadata for Docker Hub
+      id: meta-dockerhub
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKERHUB_IMAGE }}
+        tags: |
+          type=raw,value=${{ matrix.target }}
+          type=raw,value=${{ matrix.target }}-${{ github.sha }}
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+
+    - name: Extract metadata for GHCR
+      id: meta-ghcr
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.GHCR_IMAGE }}
+        tags: |
+          type=raw,value=${{ matrix.target }}
+          type=raw,value=${{ matrix.target }}-${{ github.sha }}
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+
+    - name: Build and push multi-architecture image
       uses: docker/build-push-action@v5
       with:
         context: .
-        target: rootless
+        file: Dockerfile
+        target: ${{ matrix.target }}
         platforms: linux/amd64,linux/arm64
+        build-args: |
+          BASE_IMAGE=${{ env.DOCKERHUB_IMAGE }}:${{ needs.build-base-images.outputs.base2-tag }}
         push: true
         tags: |
-          ghcr.io/${{ github.repository_owner }}/uptime-kuma:latest
-          ghcr.io/${{ github.repository_owner }}/uptime-kuma:${{ github.sha }}
+          ${{ steps.meta-dockerhub.outputs.tags }}
+          ${{ steps.meta-ghcr.outputs.tags }}
         labels: |
+          ${{ steps.meta-dockerhub.outputs.labels }}
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Update latest tag for master/main branch
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+      run: |
+        # 为master/main分支额外推送latest标签
+        docker buildx build \
+          --push \
+          --platform linux/amd64,linux/arm64 \
+          --target ${{ matrix.target }} \
+          --tag ${{ env.DOCKERHUB_IMAGE }}:${{ matrix.target }}-latest \
+          --tag ${{ env.GHCR_IMAGE }}:${{ matrix.target }}-latest \
+          .
+
+  # 开发环境测试
+  test-dev-environment:
+    needs: build-main-images
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Test development build
+      run: |
+        # 测试开发环境构建
+        docker build -f Dockerfile --target pr-test2 -t uptime-kuma-pr-test .
+        echo "PR test image built successfully"
+
+    - name: Test docker-compose development setup
+      run: |
+        # 如果有docker-compose.yml文件，测试开发环境
+        if [ -f "docker-compose-dev.yml" ]; then
+          docker-compose -f docker-compose-dev.yml build
+          echo "Development compose build successful"
+        fi
+
+  # 安全扫描
+  security-scan:
+    needs: build-main-images
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build image for scanning
+      run: |
+        docker build -f Dockerfile --target rootless -t uptime-kuma-scan .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'uptime-kuma-scan'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'trivy-results.sarif'
+      if: always()
+
+  # 清理缓存（可选）
+  cleanup:
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Clean up Docker resources
+      run: |
+        docker system prune -f
