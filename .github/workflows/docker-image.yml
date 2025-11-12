@@ -1,251 +1,36 @@
-name: Build and Push Uptime Kuma
+name: Copy Uptime Kuma Stable Image
 
 on:
-  push:
-    branches: [ "master", "main" ]
-  pull_request:
-    branches: [ "master", "main" ]
-
-env:
-  # 配置镜像名称 - 请修改为你的用户名
-  DOCKERHUB_IMAGE: "goyo123321/uptime-kuma"
-  GHCR_IMAGE: "ghcr.io/${{ github.repository_owner }}/uptime-kuma"
+  workflow_dispatch:  # 仅手动触发
 
 jobs:
-
-  # 构建基础镜像
-  build-base-images:
-    runs-on: ubuntu-latest
-    outputs:
-      base2-tag: ${{ steps.tag.outputs.base2-tag }}
-      builder-go-tag: ${{ steps.tag.outputs.builder-go-tag }}
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Generate tags
-      id: tag
-      run: |
-        echo "base2-tag=base2-$(date +%Y%m%d)-${{ github.sha }}" >> $GITHUB_OUTPUT
-        echo "builder-go-tag=builder-go-$(date +%Y%m%d)-${{ github.sha }}" >> $GITHUB_OUTPUT
-
-    - name: Build base2-slim image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: debian-base.dockerfile
-        target: base2-slim
-        tags: |
-          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.base2-tag }}-slim
-        push: false
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build base2 image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: debian-base.dockerfile
-        target: base2
-        tags: |
-          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.base2-tag }}
-        push: false
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build builder-go image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: builder-go.dockerfile
-        tags: |
-          ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.builder-go-tag }}
-        push: false
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  # 构建主应用镜像
-  build-main-images:
-    needs: build-base-images
-    runs-on: ubuntu-latest
-    
-    strategy:
-      matrix:
-        target: [release, rootless, nightly]
-        platform: [linux/amd64, linux/arm64]
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build healthcheck binary
-      run: |
-        # 构建健康检查工具
-        docker build -f builder-go.dockerfile -t temp-builder-go .
-        
-    - name: Build main image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: Dockerfile
-        target: ${{ matrix.target }}
-        platforms: ${{ matrix.platform }}
-        build-args: |
-          BASE_IMAGE=${{ env.DOCKERHUB_IMAGE }}:${{ needs.build-base-images.outputs.base2-tag }}
-        tags: |
-          ${{ env.DOCKERHUB_IMAGE }}:${{ matrix.target }}-${{ matrix.platform }}-${{ github.sha }}
-        push: false
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  # 多架构构建和推送
-  push-multiarch:
-    needs: [build-base-images, build-main-images]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-    
-    strategy:
-      matrix:
-        target: [release, rootless]
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata for Docker Hub
-      id: meta-dockerhub
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.DOCKERHUB_IMAGE }}
-        tags: |
-          type=raw,value=${{ matrix.target }}
-          type=raw,value=${{ matrix.target }}-${{ github.sha }}
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-
-    - name: Extract metadata for GHCR
-      id: meta-ghcr
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.GHCR_IMAGE }}
-        tags: |
-          type=raw,value=${{ matrix.target }}
-          type=raw,value=${{ matrix.target }}-${{ github.sha }}
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-
-    - name: Build and push multi-architecture image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: Dockerfile
-        target: ${{ matrix.target }}
-        platforms: linux/amd64,linux/arm64
-        build-args: |
-          BASE_IMAGE=${{ env.DOCKERHUB_IMAGE }}:${{ needs.build-base-images.outputs.base2-tag }}
-        push: true
-        tags: |
-          ${{ steps.meta-dockerhub.outputs.tags }}
-          ${{ steps.meta-ghcr.outputs.tags }}
-        labels: |
-          ${{ steps.meta-dockerhub.outputs.labels }}
-          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Update latest tag for master/main branch
-      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-      run: |
-        # 为master/main分支额外推送latest标签
-        docker buildx build \
-          --push \
-          --platform linux/amd64,linux/arm64 \
-          --target ${{ matrix.target }} \
-          --tag ${{ env.DOCKERHUB_IMAGE }}:${{ matrix.target }}-latest \
-          --tag ${{ env.GHCR_IMAGE }}:${{ matrix.target }}-latest \
-          .
-
-  # 开发环境测试
-  test-dev-environment:
-    needs: build-main-images
+  copy-image:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
 
-    - name: Test development build
-      run: |
-        # 测试开发环境构建
-        docker build -f Dockerfile --target pr-test2 -t uptime-kuma-pr-test .
-        echo "PR test image built successfully"
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-    - name: Test docker-compose development setup
-      run: |
-        # 如果有docker-compose.yml文件，测试开发环境
-        if [ -f "docker-compose-dev.yml" ]; then
-          docker-compose -f docker-compose-dev.yml build
-          echo "Development compose build successful"
-        fi
-
-  # 安全扫描
-  security-scan:
-    needs: build-main-images
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Build image for scanning
-      run: |
-        docker build -f Dockerfile --target rootless -t uptime-kuma-scan .
-
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: 'uptime-kuma-scan'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-
-    - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: 'trivy-results.sarif'
-      if: always()
-
-  # 清理缓存（可选）
-  cleanup:
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Clean up Docker resources
-      run: |
-        docker system prune -f
+      - name: Pull and retag image
+        run: |
+          # 拉取源镜像
+          docker pull ghcr.io/louislam/uptime-kuma:nightly2
+          
+          # 重新打标签为稳定版本
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma:latest
+          docker tag ghcr.io/louislam/uptime-kuma:nightly2 ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma:stable
+          
+          # 推送镜像
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma:stable
+          
+          echo "✅ 镜像已成功复制并推送为稳定版本！"
+          echo "📦 镜像地址: ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma:latest"
